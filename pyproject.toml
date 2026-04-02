@@ -38,11 +38,14 @@ gpu = [
     "accelerate",
     "bitsandbytes",
 ]
+claude = [
+    "anthropic>=0.40.0",
+]
 embeddings = [
     "sentence-transformers",
 ]
 all = [
-    "openmind[gpu,embeddings]",
+    "openmind[gpu,claude,embeddings]",
 ]
 
 [project.urls]

@@ -176,8 +176,9 @@ class KnowledgeRegistry:
     def register_promotion(
         self,
         promotion_result: Dict[str, Any],
-        model: Any,
         source_experiences: Sequence[Any],
+        model: Any = None,
+        articulate_fn: Any = None,
     ) -> PromotedKnowledge:
         """Create and persist a new :class:`PromotedKnowledge` entry.
 
@@ -204,11 +205,17 @@ class KnowledgeRegistry:
                 if tag not in domain_tags:
                     domain_tags.append(tag)
 
-        belief_summary = self._articulate_learning(
-            model=model,
-            source_experiences=source_experiences,
-            promotion_scores=promotion_result.get("promotion_scores", {}),
-        )
+        if articulate_fn is not None:
+            belief_summary = articulate_fn(
+                source_experiences,
+                promotion_result.get("promotion_scores", {}),
+            )
+        else:
+            belief_summary = self._articulate_learning(
+                model=model,
+                source_experiences=source_experiences,
+                promotion_scores=promotion_result.get("promotion_scores", {}),
+            )
 
         confidence = float(promotion_result.get("confidence", 0.5))
 
@@ -329,6 +336,12 @@ class KnowledgeRegistry:
         """Expose the domain -> knowledge-id index (read-only view)."""
         self._ensure_loaded()
         return dict(self._domain_index)
+
+    @property
+    def knowledge(self) -> Dict[str, PromotedKnowledge]:
+        """Expose the knowledge entries dict for subsystem access."""
+        self._ensure_loaded()
+        return self._entries
 
     def __len__(self) -> int:
         self._ensure_loaded()

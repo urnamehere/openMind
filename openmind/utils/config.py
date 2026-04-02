@@ -94,6 +94,32 @@ class TemporalConfig:
 
 
 @dataclass
+class ClaudeConfig:
+    """Configuration for the Claude API backend."""
+
+    api_key_env_var: str = "ANTHROPIC_API_KEY"
+    model: str = "claude-sonnet-4-20250514"
+    eval_model: str = "claude-haiku-4-20250414"
+    max_tokens: int = 1024
+    temperature: float = 0.7
+    system_prompt_token_budget: int = 4000
+    base_system_prompt: Optional[str] = None
+    few_shot_count: int = 3
+    few_shot_min_reward: float = 0.3
+    consolidation_cluster_size: int = 10
+    consolidation_max_clusters: int = 5
+    max_reviews_per_cycle: int = 10
+
+
+@dataclass
+class BackendConfig:
+    """Which backend to use: 'claude' or 'local'."""
+
+    backend_type: str = "claude"
+    claude: ClaudeConfig = field(default_factory=ClaudeConfig)
+
+
+@dataclass
 class StorageConfig:
     """Paths for persistent data stores.
 
@@ -143,6 +169,7 @@ class OpenMindConfig:
     review: ReviewConfig = field(default_factory=ReviewConfig)
     temporal: TemporalConfig = field(default_factory=TemporalConfig)
     storage: StorageConfig = field(default_factory=StorageConfig)
+    backend: BackendConfig = field(default_factory=BackendConfig)
 
     # ------------------------------------------------------------------
     # Serialisation
@@ -166,6 +193,15 @@ class OpenMindConfig:
             filtered = {k: v for k, v in section_data.items() if k in known}
             return klass(**filtered)
 
+        backend_data = data.get("backend")
+        if backend_data is not None:
+            backend_obj = BackendConfig(
+                backend_type=backend_data.get("backend_type", "claude"),
+                claude=_safe_init(ClaudeConfig, backend_data.get("claude")),
+            )
+        else:
+            backend_obj = BackendConfig()
+
         return cls(
             model=_safe_init(ModelConfig, data.get("model")),
             training=_safe_init(TrainingConfig, data.get("training")),
@@ -175,6 +211,7 @@ class OpenMindConfig:
             review=_safe_init(ReviewConfig, data.get("review")),
             temporal=_safe_init(TemporalConfig, data.get("temporal")),
             storage=_safe_init(StorageConfig, data.get("storage")),
+            backend=backend_obj,
         )
 
     # ------------------------------------------------------------------

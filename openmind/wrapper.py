@@ -8,9 +8,8 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from openmind.backends.base import Backend
 from openmind.core.experience import Experience, ExperienceBuffer
-from openmind.core.promotion import WeightPromoter, WeightStabilityTracker
-from openmind.core.training import TrainingCycleManager
 from openmind.detection.detectors import DetectionResult, SignalQualityDetector, SignalVerdict
 from openmind.memory.ambiguity import AmbiguityBuffer, AmbiguityResolver
 from openmind.memory.knowledge import KnowledgeRegistry
@@ -28,19 +27,30 @@ logger = logging.getLogger(__name__)
 class ContinualWrapper:
     """
     A continuous learning wrapper for LLMs that enables experiential
-    memory, weight promotion, and belief revision.
+    memory, knowledge accumulation, and belief revision.
+
+    Supports two backends:
+    - **Claude API**: Learning via knowledge distillation, dynamic system
+      prompts, and RAG over past experiences.
+    - **Local HuggingFace**: Learning via LoRA adapter training, EWC
+      regularization, and selective weight promotion.
 
     Three lifecycle phases:
     - Awake: process interactions, collect rewards, detect signal quality
-    - Sleep (consolidate): train adapter, promote stable weights, resolve ambiguities
-    - Reflect: review promoted knowledge, run meta-reward evaluation
+    - Sleep (consolidate): distill knowledge or train adapter weights
+    - Reflect: review accumulated knowledge, run meta-reward evaluation
 
     Usage::
 
+        # Claude API backend (default)
         from openmind import ContinualWrapper
+        model = ContinualWrapper()
+        response = model.chat("hello")
 
+        # Local model backend
         model = ContinualWrapper(base_model="mistralai/Mistral-7B-v0.3")
         response = model.chat("hello")
+
         model.consolidate()  # trigger sleep cycle
         model.reflect()      # trigger belief review
     """
@@ -60,13 +70,13 @@ class ContinualWrapper:
         else:
             self.config = OpenMindConfig()
 
+        # If a base_model path is given, switch to local backend
         if base_model is not None:
             self.config.model.base_model_path = base_model
+            self.config.backend.backend_type = "local"
 
         # Override data directory
         self.config.storage.data_dir = data_dir
-
-        # Ensure data directory exists
         Path(data_dir).mkdir(parents=True, exist_ok=True)
 
         # Initialize storage paths
@@ -78,9 +88,15 @@ class ContinualWrapper:
         # === Core subsystems ===
         self.experience_buffer = ExperienceBuffer(db_path=exp_db)
         self.domain_tagger = DomainTagger()
+        self.knowledge_registry = KnowledgeRegistry(storage_path=know_db)
+
+        # === Backend ===
+        self.backend: Backend = self._create_backend()
 
         # === Reward subsystems ===
-        self.reward_collector = RewardCollector()
+        self.reward_collector = RewardCollector(
+            model=self.backend if self.backend.is_ready else None,
+        )
         self.temporal_tracker = TemporalRewardTracker(db_path=temp_db)
         self.inquiry_system = ActiveInquirySystem(
             ask_budget_per_session=self.config.inquiry.ask_budget_per_session,
@@ -90,7 +106,6 @@ class ContinualWrapper:
         self.meta_rewards = MetaRewardSystem()
 
         # === Detection ===
-        self.knowledge_registry = KnowledgeRegistry(db_path=know_db)
         self.signal_detector = SignalQualityDetector(
             experience_buffer=self.experience_buffer,
             knowledge_registry=self.knowledge_registry,
@@ -101,22 +116,17 @@ class ContinualWrapper:
         self.ambiguity_resolver = AmbiguityResolver(
             ambiguity_buffer=self.ambiguity_buffer,
             experience_buffer=self.experience_buffer,
-            stability_tracker=None,  # set after stability_tracker init
+            stability_tracker=None,
         )
 
-        # === Training subsystems (require GPU) ===
-        self._model = None
-        self._tokenizer = None
-        self._adapter_model = None
-        self.stability_tracker = WeightStabilityTracker(
-            history_window=self.config.promotion.min_cycles_before_promotion + 7
-        )
-        self.ambiguity_resolver.stability_tracker = self.stability_tracker
+        # For local backend, wire up stability tracker
+        if self.backend.supports_weight_training:
+            self.ambiguity_resolver.stability_tracker = getattr(
+                self.backend, "stability_tracker", None
+            )
 
-        self.weight_promoter: Optional[WeightPromoter] = None
-        self.training_manager: Optional[TrainingCycleManager] = None
         self.belief_reviewer = BeliefReviewer(
-            model=None,
+            model=self.backend if self.backend.is_ready else None,
             experience_buffer=self.experience_buffer,
             reward_collector=self.reward_collector,
             knowledge_registry=self.knowledge_registry,
@@ -127,57 +137,38 @@ class ContinualWrapper:
         self._interaction_count = 0
         self._discard_log: List[DetectionResult] = []
 
-        # Try to load model if specified
-        if self.config.model.base_model_path:
-            self._try_load_model()
+    def _create_backend(self) -> Backend:
+        """Factory method to create the appropriate backend."""
+        backend_type = self.config.backend.backend_type
 
-    def _try_load_model(self) -> None:
-        """Attempt to load the base model and set up LoRA adapter."""
-        try:
-            import torch
-            from peft import LoraConfig, get_peft_model
-            from transformers import AutoModelForCausalLM, AutoTokenizer
+        if backend_type == "claude":
+            from openmind.backends.claude import ClaudeBackend
 
-            model_path = self.config.model.base_model_path
-            logger.info("Loading model: %s", model_path)
+            embedding_provider = None
+            try:
+                from openmind.utils.embeddings import EmbeddingProvider
 
-            self._tokenizer = AutoTokenizer.from_pretrained(model_path)
-            self._model = AutoModelForCausalLM.from_pretrained(
-                model_path, torch_dtype=torch.float16, device_map="auto"
-            )
+                embedding_provider = EmbeddingProvider()
+            except Exception:
+                pass
 
-            lora_config = LoraConfig(
-                r=self.config.model.lora_r,
-                lora_alpha=self.config.model.lora_alpha,
-                target_modules=self.config.model.target_modules,
-                lora_dropout=self.config.model.lora_dropout,
-            )
-            self._adapter_model = get_peft_model(self._model, lora_config)
-
-            self.weight_promoter = WeightPromoter(
-                base_model=self._model,
-                adapter_model=self._adapter_model,
-                eval_fn=self._evaluate_model,
-                rollback_threshold=self.config.promotion.rollback_threshold,
-                merge_alpha=self.config.model.merge_alpha,
-            )
-
-            self.training_manager = TrainingCycleManager(
-                base_model=self._model,
-                adapter_model=self._adapter_model,
+            return ClaudeBackend(
+                config=self.config.backend.claude,
+                knowledge_registry=self.knowledge_registry,
                 experience_buffer=self.experience_buffer,
+                embedding_provider=embedding_provider,
             )
 
-            self.belief_reviewer.model = self._model
-            logger.info("Model loaded successfully")
+        elif backend_type == "local":
+            from openmind.backends.local import LocalHFBackend
 
-        except ImportError:
-            logger.warning(
-                "GPU dependencies not available (torch, peft, transformers). "
-                "Running in data-collection-only mode."
+            return LocalHFBackend(
+                model_config=self.config.model,
+                promotion_config=self.config.promotion,
             )
-        except Exception as e:
-            logger.warning("Failed to load model: %s. Running in data-collection mode.", e)
+
+        else:
+            raise ValueError(f"Unknown backend type: {backend_type!r}")
 
     def chat(
         self,
@@ -254,8 +245,8 @@ class ContinualWrapper:
 
     def consolidate(self) -> Dict[str, Any]:
         """
-        The 'sleep' cycle. Train adapter, check for promotions,
-        resolve ambiguities.
+        The 'sleep' cycle. Delegates to the backend for learning, then
+        resolves ambiguities.
 
         Returns:
             Dictionary of cycle statistics.
@@ -263,67 +254,28 @@ class ContinualWrapper:
         stats: Dict[str, Any] = {
             "cycle": self._training_cycle,
             "timestamp": time.time(),
-            "training": None,
-            "promotion": None,
+            "consolidation": None,
             "ambiguity_resolution": None,
         }
 
-        # 1. Training cycle
-        if self.training_manager is not None:
-            try:
-                training_stats = self.training_manager.run_cycle()
-                stats["training"] = training_stats
-                self._training_cycle += 1
+        # Backend-specific consolidation
+        try:
+            backend_stats = self.backend.consolidate(
+                experience_buffer=self.experience_buffer,
+                knowledge_registry=self.knowledge_registry,
+                cycle=self._training_cycle,
+            )
+            stats["consolidation"] = backend_stats
+            self._training_cycle += 1
+        except Exception as e:
+            logger.error("Consolidation failed: %s", e)
+            stats["consolidation"] = {"error": str(e)}
 
-                # 2. Record adapter state for stability tracking
-                if self._adapter_model is not None:
-                    self.stability_tracker.record_adapter_state(
-                        self._adapter_model.state_dict(),
-                        self._training_cycle,
-                    )
-
-                # 3. Check for promotable weights
-                scores = self.stability_tracker.compute_promotion_scores(
-                    threshold=self.config.promotion.stability_threshold
-                )
-                promotable = {
-                    k: v for k, v in scores.items()
-                    if v.get("ready_for_promotion", False)
-                }
-
-                if promotable and self.weight_promoter is not None:
-                    promoted, failed = self.weight_promoter.selective_merge(
-                        scores, eval_dataset=None
-                    )
-                    stats["promotion"] = {
-                        "promoted": len(promoted),
-                        "failed": len(failed),
-                        "details": promoted,
-                    }
-
-                    # Register promoted knowledge
-                    for p in promoted:
-                        self.knowledge_registry.register_promotion(
-                            promotion_result={
-                                "cycle": self._training_cycle,
-                                "promoted_layers": [p["layer"]],
-                                "scores": scores,
-                                "confidence": 0.8,
-                            },
-                            model=self._model,
-                            source_experiences=[],
-                        )
-
-            except Exception as e:
-                logger.error("Training cycle failed: %s", e)
-                stats["training"] = {"error": str(e)}
-        else:
-            stats["training"] = {"status": "no_model_loaded"}
-
-        # 4. Resolve ambiguities
+        # Resolve ambiguities (backend-agnostic)
         try:
             resolved, still_pending = self.ambiguity_resolver.review_cycle(
-                model=self._model, current_cycle=self._training_cycle
+                model=self.backend if self.backend.is_ready else None,
+                current_cycle=self._training_cycle,
             )
 
             for resolution in resolved:
@@ -368,28 +320,31 @@ class ContinualWrapper:
 
     def reflect(self) -> Dict[str, Any]:
         """
-        The 'reflection' cycle. Review promoted knowledge and
-        evaluate reward system health.
+        The 'reflection' cycle. Delegates to the backend for belief review,
+        then runs meta-reward evaluation.
 
         Returns:
             Dictionary of review statistics.
         """
         stats: Dict[str, Any] = {
             "timestamp": time.time(),
-            "reviews": [],
+            "reflection": None,
             "meta_rewards": None,
         }
 
-        # 1. Review knowledge
-        candidates = self.knowledge_registry.get_review_candidates()
-        for knowledge_id, priority in candidates[:10]:  # cap at 10 per cycle
-            try:
-                result = self.belief_reviewer.review(knowledge_id)
-                stats["reviews"].append(result)
-            except Exception as e:
-                logger.error("Review failed for %s: %s", knowledge_id, e)
+        # Backend-specific reflection
+        try:
+            reflection_stats = self.backend.reflect(
+                knowledge_registry=self.knowledge_registry,
+                experience_buffer=self.experience_buffer,
+                belief_reviewer=self.belief_reviewer,
+            )
+            stats["reflection"] = reflection_stats
+        except Exception as e:
+            logger.error("Reflection failed: %s", e)
+            stats["reflection"] = {"error": str(e)}
 
-        # 2. Meta-reward evaluation
+        # Meta-reward evaluation (backend-agnostic)
         try:
             metrics, recommendations = self.meta_rewards.evaluate_reward_quality(
                 temporal_tracker=self.temporal_tracker,
@@ -407,50 +362,36 @@ class ContinualWrapper:
     def get_status(self) -> Dict[str, Any]:
         """Get current system state."""
         return {
+            "backend": self.config.backend.backend_type,
+            "backend_ready": self.backend.is_ready,
             "interaction_count": self._interaction_count,
             "training_cycle": self._training_cycle,
             "experience_buffer_size": len(self.experience_buffer.buffer),
             "ambiguity_buffer_size": len(self.ambiguity_buffer.active_ambiguities),
-            "knowledge_count": len(self.knowledge_registry.knowledge),
+            "knowledge_count": len(self.knowledge_registry),
             "temporal_tracker_size": len(self.temporal_tracker.active_rewards),
             "pending_inquiries": len(self.inquiry_system.pending_inquiries),
             "discarded_count": len(self._discard_log),
-            "model_loaded": self._model is not None,
             "domain_frequencies": self.domain_tagger.get_all_frequencies(),
         }
 
     def _generate(self, user_input: str) -> str:
-        """Generate a response from the model."""
-        if self._model is None or self._tokenizer is None:
-            return f"[openMind: no model loaded - recording interaction for future training]"
+        """Generate a response via the backend."""
+        if not self.backend.is_ready:
+            return "[openMind: backend not ready - recording interaction for future learning]"
 
-        try:
-            import torch
+        from openmind.backends.base import GenerationContext
 
-            inputs = self._tokenizer(user_input, return_tensors="pt")
-            inputs = {k: v.to(self._model.device) for k, v in inputs.items()}
+        domain_tags = self.domain_tagger.tag(user_input, "")
 
-            with torch.no_grad():
-                outputs = self._model.generate(
-                    **inputs,
-                    max_new_tokens=512,
-                    do_sample=True,
-                    temperature=0.7,
-                    top_p=0.9,
-                )
+        context = GenerationContext(
+            domain_tags=domain_tags,
+            max_tokens=self.config.backend.claude.max_tokens
+            if self.config.backend.backend_type == "claude"
+            else 1024,
+            temperature=self.config.backend.claude.temperature
+            if self.config.backend.backend_type == "claude"
+            else 0.7,
+        )
 
-            response = self._tokenizer.decode(
-                outputs[0][inputs["input_ids"].shape[1]:],
-                skip_special_tokens=True,
-            )
-            return response.strip()
-
-        except Exception as e:
-            logger.error("Generation failed: %s", e)
-            return f"[openMind: generation error - {e}]"
-
-    def _evaluate_model(self, model: Any, dataset: Any) -> float:
-        """Evaluate model on a benchmark dataset."""
-        # TODO: Implement proper evaluation pipeline
-        # For now, return a baseline score
-        return 0.5
+        return self.backend.generate(user_input, context=context)
