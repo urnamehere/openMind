@@ -94,6 +94,17 @@ class TemporalConfig:
 
 
 @dataclass
+class CuriosityConfig:
+    """Configuration for curiosity-driven autonomous exploration."""
+
+    enabled: bool = True
+    budget_per_cycle: int = 3
+    min_curiosity_threshold: float = 0.3
+    novelty_decay: float = 0.02
+    mastery_growth_rate: float = 0.01
+
+
+@dataclass
 class ClaudeConfig:
     """Configuration for the Claude API backend."""
 
@@ -170,6 +181,7 @@ class OpenMindConfig:
     temporal: TemporalConfig = field(default_factory=TemporalConfig)
     storage: StorageConfig = field(default_factory=StorageConfig)
     backend: BackendConfig = field(default_factory=BackendConfig)
+    curiosity: CuriosityConfig = field(default_factory=CuriosityConfig)
 
     # ------------------------------------------------------------------
     # Serialisation
@@ -212,6 +224,7 @@ class OpenMindConfig:
             temporal=_safe_init(TemporalConfig, data.get("temporal")),
             storage=_safe_init(StorageConfig, data.get("storage")),
             backend=backend_obj,
+            curiosity=_safe_init(CuriosityConfig, data.get("curiosity")),
         )
 
     # ------------------------------------------------------------------

@@ -10,6 +10,8 @@ from typing import Any, Dict, List, Optional
 
 from openmind.backends.base import Backend
 from openmind.core.experience import Experience, ExperienceBuffer
+from openmind.curiosity.explorer import CuriosityEngine
+from openmind.curiosity.interest import InterestModel
 from openmind.detection.detectors import DetectionResult, SignalQualityDetector, SignalVerdict
 from openmind.memory.ambiguity import AmbiguityBuffer, AmbiguityResolver
 from openmind.memory.knowledge import KnowledgeRegistry
@@ -132,6 +134,21 @@ class ContinualWrapper:
             knowledge_registry=self.knowledge_registry,
         )
 
+        # === Curiosity subsystem ===
+        interest_db = os.path.join(data_dir, "interest_model.json")
+        curiosity_cfg = getattr(self.config, "curiosity", None)
+        self.interest_model = InterestModel(storage_path=interest_db)
+        self.curiosity_engine = CuriosityEngine(
+            interest_model=self.interest_model,
+            backend=self.backend,
+            experience_buffer=self.experience_buffer,
+            knowledge_registry=self.knowledge_registry,
+            budget_per_cycle=getattr(curiosity_cfg, "budget_per_cycle", 3),
+            min_curiosity_threshold=getattr(
+                curiosity_cfg, "min_curiosity_threshold", 0.3
+            ),
+        )
+
         # Tracking
         self._training_cycle = 0
         self._interaction_count = 0
@@ -240,6 +257,13 @@ class ContinualWrapper:
 
         elif detection.verdict == SignalVerdict.DISCARD:
             self._discard_log.append(detection)
+
+        # Update curiosity / interest model
+        self.interest_model.update_from_experience(
+            domain_tags=domain_tags,
+            reward=reward.aggregate,
+            was_shelved=(detection.verdict == SignalVerdict.SHELVE),
+        )
 
         return output
 
@@ -359,6 +383,42 @@ class ContinualWrapper:
 
         return stats
 
+    def explore(self) -> Dict[str, Any]:
+        """
+        Run an autonomous curiosity-driven exploration cycle.
+
+        The system identifies what it's most curious about -- domains where
+        it's making progress, has knowledge gaps, or sees cross-domain
+        connections -- and autonomously investigates them.
+
+        Returns:
+            Dictionary with exploration results and updated curiosity state.
+        """
+        stats: Dict[str, Any] = {
+            "timestamp": time.time(),
+            "explorations": [],
+            "curiosity_summary": None,
+        }
+
+        try:
+            explorations = self.curiosity_engine.explore()
+            stats["explorations"] = [e.to_dict() for e in explorations]
+        except Exception as e:
+            logger.error("Exploration cycle failed: %s", e)
+            stats["explorations"] = {"error": str(e)}
+
+        stats["curiosity_summary"] = self.interest_model.summary()
+        return stats
+
+    def get_curious_about(self) -> Dict[str, Any]:
+        """Show what the system is currently curious about.
+
+        Returns a human-readable summary of top interests, knowledge gaps,
+        domains where learning is progressing, and what it would like to
+        explore next.
+        """
+        return self.curiosity_engine.get_curious_about()
+
     def get_status(self) -> Dict[str, Any]:
         """Get current system state."""
         return {
@@ -372,6 +432,7 @@ class ContinualWrapper:
             "temporal_tracker_size": len(self.temporal_tracker.active_rewards),
             "pending_inquiries": len(self.inquiry_system.pending_inquiries),
             "discarded_count": len(self._discard_log),
+            "curiosity": self.interest_model.summary(),
             "domain_frequencies": self.domain_tagger.get_all_frequencies(),
         }
 
