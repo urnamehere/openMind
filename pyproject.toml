@@ -53,8 +53,8 @@ Homepage = "https://github.com/openmind-project/openmind"
 Repository = "https://github.com/openmind-project/openmind"
 Issues = "https://github.com/openmind-project/openmind/issues"
 
-# [project.scripts]
-# openmind = "openmind.cli:main"
+[project.scripts]
+openmind = "openmind.__main__:main"
 
 [tool.setuptools.packages.find]
 include = ["openmind*"]

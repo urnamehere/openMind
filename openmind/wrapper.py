@@ -88,7 +88,7 @@ class ContinualWrapper:
         temp_db = os.path.join(data_dir, "temporal_rewards.jsonl")
 
         # === Core subsystems ===
-        self.experience_buffer = ExperienceBuffer(db_path=exp_db)
+        self.experience_buffer = ExperienceBuffer(storage_path=exp_db)
         self.domain_tagger = DomainTagger()
         self.knowledge_registry = KnowledgeRegistry(storage_path=know_db)
 
@@ -99,7 +99,7 @@ class ContinualWrapper:
         self.reward_collector = RewardCollector(
             model=self.backend if self.backend.is_ready else None,
         )
-        self.temporal_tracker = TemporalRewardTracker(db_path=temp_db)
+        self.temporal_tracker = TemporalRewardTracker(storage_path=temp_db)
         self.inquiry_system = ActiveInquirySystem(
             ask_budget_per_session=self.config.inquiry.ask_budget_per_session,
             ask_budget_per_day=self.config.inquiry.ask_budget_per_day,
@@ -114,18 +114,11 @@ class ContinualWrapper:
         )
 
         # === Memory subsystems ===
-        self.ambiguity_buffer = AmbiguityBuffer(db_path=amb_db)
+        self.ambiguity_buffer = AmbiguityBuffer(storage_path=amb_db)
         self.ambiguity_resolver = AmbiguityResolver(
             ambiguity_buffer=self.ambiguity_buffer,
             experience_buffer=self.experience_buffer,
-            stability_tracker=None,
         )
-
-        # For local backend, wire up stability tracker
-        if self.backend.supports_weight_training:
-            self.ambiguity_resolver.stability_tracker = getattr(
-                self.backend, "stability_tracker", None
-            )
 
         self.belief_reviewer = BeliefReviewer(
             model=self.backend if self.backend.is_ready else None,
@@ -426,10 +419,9 @@ class ContinualWrapper:
             "backend_ready": self.backend.is_ready,
             "interaction_count": self._interaction_count,
             "training_cycle": self._training_cycle,
-            "experience_buffer_size": len(self.experience_buffer.buffer),
-            "ambiguity_buffer_size": len(self.ambiguity_buffer.active_ambiguities),
+            "experience_buffer_size": len(self.experience_buffer),
+            "ambiguity_buffer_size": len(self.ambiguity_buffer),
             "knowledge_count": len(self.knowledge_registry),
-            "temporal_tracker_size": len(self.temporal_tracker.active_rewards),
             "pending_inquiries": len(self.inquiry_system.pending_inquiries),
             "discarded_count": len(self._discard_log),
             "curiosity": self.interest_model.summary(),
