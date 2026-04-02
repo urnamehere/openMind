@@ -1,0 +1,68 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "openmind"
+version = "0.1.0"
+description = "A continuous learning wrapper for LLMs that enables experiential memory, weight promotion, and belief revision - inspired by biological memory consolidation"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.9"
+authors = [
+    { name = "openMind contributors" },
+]
+keywords = ["llm", "continuous-learning", "memory", "fine-tuning", "lora"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+    "numpy",
+    "pyyaml",
+]
+
+[project.optional-dependencies]
+gpu = [
+    "torch",
+    "transformers",
+    "peft",
+    "trl",
+    "accelerate",
+    "bitsandbytes",
+]
+embeddings = [
+    "sentence-transformers",
+]
+all = [
+    "openmind[gpu,embeddings]",
+]
+
+[project.urls]
+Homepage = "https://github.com/openmind-project/openmind"
+Repository = "https://github.com/openmind-project/openmind"
+Issues = "https://github.com/openmind-project/openmind/issues"
+
+# [project.scripts]
+# openmind = "openmind.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["openmind*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-v --tb=short"
+
+[tool.ruff]
+target-version = "py39"
+line-length = 88
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I"]

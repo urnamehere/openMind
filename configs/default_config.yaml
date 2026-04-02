@@ -1,0 +1,72 @@
+# openMind default configuration
+# Copy this file and override values as needed.
+
+model:
+  lora_r: 16
+  lora_alpha: 32
+  lora_dropout: 0.05
+  lora_target_modules:
+    - q_proj
+    - v_proj
+  max_seq_length: 2048
+
+training:
+  batch_size: 4
+  gradient_accumulation_steps: 4
+  learning_rate: 2.0e-5
+  epochs: 3
+  recent_min_reward: 0.3
+  recent_max_samples: 256
+  replay_samples: 64
+  ewc_lambda: 5000.0
+  ewc_sample_size: 128
+  device: auto
+
+# Detection thresholds for the 8 detectors.
+# Each value in [0.0, 1.0]; lower = more sensitive.
+detection:
+  contradiction_threshold: 0.65
+  confidence_drop_threshold: 0.30
+  novelty_threshold: 0.50
+  user_correction_threshold: 0.40
+  domain_shift_threshold: 0.55
+  repetition_threshold: 0.70
+  hallucination_threshold: 0.60
+  reasoning_failure_threshold: 0.50
+
+# How many clarifying questions the system may ask per interaction.
+inquiry:
+  max_questions_per_turn: 2
+  budget_per_session: 5
+  cooldown_turns: 3
+
+# Promotion: when soft memory becomes a LoRA weight update.
+promotion:
+  min_occurrences: 5
+  min_avg_reward: 0.6
+  min_confidence: 0.7
+  staleness_days: 30
+
+# Spaced-repetition review intervals (in hours).
+review:
+  intervals:
+    - 1
+    - 6
+    - 24
+    - 72
+    - 168    # 1 week
+    - 720    # ~1 month
+  success_multiplier: 2.0
+  failure_divisor: 2.0
+
+# Temporal settings
+temporal:
+  cooling_off_hours: 4
+  experience_ttl_days: 90
+
+# Storage paths (relative to working directory)
+storage:
+  experience_buffer: openmind_data/experiences.jsonl
+  memory_index: openmind_data/memory_index.json
+  checkpoint_dir: checkpoints/
+  config_override: configs/user_config.yaml
